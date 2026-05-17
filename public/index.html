@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TimeChek</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header>
+        <h1>TimeChek</h1>
+        <p>Coordinate huddle availability, vote quickly, and notify Slack.</p>
+      </header>
+
+      <section class="card">
+        <h2>Create huddle</h2>
+        <form id="create-huddle-form" class="stack">
+          <label>
+            Huddle title
+            <input type="text" name="title" required placeholder="Weekly product huddle" />
+          </label>
+          <label>
+            Description
+            <textarea name="description" rows="2" placeholder="Optional context"></textarea>
+          </label>
+          <button type="submit">Create huddle</button>
+        </form>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2>Huddles</h2>
+          <ul id="huddle-list" class="list"></ul>
+        </article>
+
+        <article class="card" id="huddle-panel" hidden>
+          <h2 id="huddle-title"></h2>
+          <p id="huddle-description"></p>
+
+          <div class="stack">
+            <h3>Propose availability window</h3>
+            <form id="window-form" class="stack">
+              <label>
+                Your name
+                <input type="text" name="proposerName" required placeholder="Alex" />
+              </label>
+              <label>
+                Start
+                <input type="datetime-local" name="startTime" required />
+              </label>
+              <label>
+                End
+                <input type="datetime-local" name="endTime" required />
+              </label>
+              <button type="submit">Add window</button>
+            </form>
+          </div>
+
+          <div class="stack">
+            <h3>Voting</h3>
+            <label>
+              Your voter name
+              <input id="voter-name" type="text" placeholder="Use same name each time" />
+            </label>
+            <p class="hint">Click “Toggle vote” on any proposed window.</p>
+          </div>
+
+          <div class="stack">
+            <h3>Shared schedule</h3>
+            <div id="schedule"></div>
+          </div>
+
+          <div class="row">
+            <button id="post-results-btn" type="button">Post results to Slack</button>
+            <button id="post-reminder-btn" type="button" class="secondary">Post reminder to Slack</button>
+          </div>
+          <label>
+            Slack webhook URL (optional if env configured)
+            <input id="slack-webhook" type="url" placeholder="https://hooks.slack.com/services/..." />
+          </label>
+          <p id="status" role="status" aria-live="polite"></p>
+        </article>
+      </section>
+    </main>
+
+    <script src="/main.js" defer></script>
+  </body>
+</html>
