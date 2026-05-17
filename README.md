@@ -22,9 +22,9 @@ TimeChek is a lightweight huddle scheduler for teams. It lets people:
 npm install
 ```
 
-### 2) (Optional) Configure Slack webhook
+### 2) Configure Slack webhook
 
-Set a default webhook so the UI can post without manually entering one:
+Set a server-side webhook used for Slack result/reminder posts:
 
 ```bash
 export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."

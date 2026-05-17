@@ -11,6 +11,7 @@ async function setup() {
   const slackCalls = [];
   const app = createApp({
     db,
+    defaultSlackWebhookUrl: 'https://hooks.slack.com/services/T000/B000/XYZ',
     sendSlackMessage: async (webhookUrl, text) => {
       slackCalls.push({ webhookUrl, text });
     },
@@ -70,7 +71,7 @@ test('toggles vote and posts result to slack', async () => {
 
   const slack = await request(app)
     .post(`/api/huddles/${huddleId}/slack/results`)
-    .send({ webhookUrl: 'https://hooks.slack.com/services/T000/B000/XYZ' });
+    .send({});
 
   assert.equal(slack.status, 200);
   assert.equal(slackCalls.length, 1);

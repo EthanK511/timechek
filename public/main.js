@@ -7,7 +7,6 @@ const descriptionEl = document.getElementById('huddle-description');
 const scheduleEl = document.getElementById('schedule');
 const statusEl = document.getElementById('status');
 const voterNameEl = document.getElementById('voter-name');
-const slackWebhookEl = document.getElementById('slack-webhook');
 
 function setStatus(message, isError = false) {
   statusEl.textContent = message;
@@ -120,12 +119,10 @@ async function loadSelectedHuddle() {
 async function postSlack(type) {
   if (!currentHuddleId) return;
 
-  const webhookUrl = slackWebhookEl.value.trim();
   const endpoint = type === 'results' ? 'results' : 'reminder';
 
   await api(`/api/huddles/${currentHuddleId}/slack/${endpoint}`, {
     method: 'POST',
-    body: JSON.stringify({ webhookUrl }),
   });
 }
 

@@ -204,7 +204,7 @@ function createApp({ db, sendSlackMessage = defaultSlackSender, defaultSlackWebh
     }
   });
 
-  async function postToSlack(huddleId, webhookOverride, mode) {
+  async function postToSlack(huddleId, mode) {
     const huddle = await db.get('SELECT * FROM huddles WHERE id = ?', [huddleId]);
     if (!huddle) {
       const error = new Error('Huddle not found.');
@@ -213,7 +213,7 @@ function createApp({ db, sendSlackMessage = defaultSlackSender, defaultSlackWebh
     }
 
     const schedule = await buildSchedule(db, huddleId);
-    const webhookUrl = String(webhookOverride || defaultSlackWebhookUrl || '').trim();
+    const webhookUrl = String(defaultSlackWebhookUrl || '').trim();
 
     if (!webhookUrl) {
       const error = new Error('Slack webhook URL is not configured.');
@@ -251,7 +251,7 @@ function createApp({ db, sendSlackMessage = defaultSlackSender, defaultSlackWebh
 
   app.post('/api/huddles/:id/slack/results', async (req, res, next) => {
     try {
-      const payload = await postToSlack(Number(req.params.id), req.body?.webhookUrl, 'results');
+      const payload = await postToSlack(Number(req.params.id), 'results');
       return res.json({ ok: true, message: 'Results posted to Slack.', payload });
     } catch (error) {
       return next(error);
@@ -260,7 +260,7 @@ function createApp({ db, sendSlackMessage = defaultSlackSender, defaultSlackWebh
 
   app.post('/api/huddles/:id/slack/reminder', async (req, res, next) => {
     try {
-      const payload = await postToSlack(Number(req.params.id), req.body?.webhookUrl, 'reminder');
+      const payload = await postToSlack(Number(req.params.id), 'reminder');
       return res.json({ ok: true, message: 'Reminder posted to Slack.', payload });
     } catch (error) {
       return next(error);
