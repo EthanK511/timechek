@@ -78,6 +78,31 @@ function createDatabase(filename = path.join(process.cwd(), 'data', 'timechek.db
         UNIQUE (window_id, voter_name),
         FOREIGN KEY (window_id) REFERENCES availability_windows(id) ON DELETE CASCADE
       );
+
+      CREATE TABLE IF NOT EXISTS find_time_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel_id TEXT NOT NULL,
+        creator_id TEXT NOT NULL,
+        creator_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        expected_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        closed_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS find_time_submissions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        user_id TEXT NOT NULL,
+        user_name TEXT NOT NULL,
+        timezone TEXT NOT NULL,
+        timezone_label TEXT NOT NULL,
+        start_time_utc TEXT NOT NULL,
+        end_time_utc TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (session_id, user_id),
+        FOREIGN KEY (session_id) REFERENCES find_time_sessions(id) ON DELETE CASCADE
+      );
     `);
   };
 

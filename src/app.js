@@ -1,6 +1,9 @@
 const express = require('express');
 const path = require('path');
-const { sendSlackMessage: defaultSlackSender } = require('./slack');
+const rateLimit = require('express-rate-limit');
+const { sendSlackMessage: defaultSlackSender, openModal, postMessage, getChannelMembers, getUserPresence } = require('./slack');
+const { verifySlackRequest } = require('./slack-verify');
+const { buildModal, buildAnnouncementMessage, buildResultMessage, localToUTC, COMMON_TIMEZONES } = require('./find-time');
 
 function parseISODate(value) {
   const parsed = new Date(value);
@@ -31,8 +34,21 @@ async function buildSchedule(db, huddleId) {
   );
 }
 
-function createApp({ db, sendSlackMessage = defaultSlackSender, defaultSlackWebhookUrl = process.env.SLACK_WEBHOOK_URL } = {}) {
+function createApp({
+  db,
+  sendSlackMessage = defaultSlackSender,
+  defaultSlackWebhookUrl = process.env.SLACK_WEBHOOK_URL,
+  slackBotToken = process.env.SLACK_BOT_TOKEN,
+  slackSigningSecret = process.env.SLACK_SIGNING_SECRET,
+  slackApiCalls = { openModal, postMessage, getChannelMembers, getUserPresence },
+} = {}) {
   const app = express();
+
+  // Capture raw body for Slack request signature verification on /slack/* routes.
+  // express.raw() must be registered before express.json() so that the body stream
+  // is not consumed twice.
+  app.use('/slack/', express.raw({ type: '*/*' }));
+
   app.use(express.json());
   app.use(express.static(path.join(process.cwd(), 'public')));
 
@@ -262,6 +278,325 @@ function createApp({ db, sendSlackMessage = defaultSlackSender, defaultSlackWebh
     try {
       const payload = await postToSlack(Number(req.params.id), 'reminder');
       return res.json({ ok: true, message: 'Reminder posted to Slack.', payload });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Slack App endpoints — /find-time and /find-time-end slash commands + modal
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Middleware to verify every /slack/* request is genuinely from Slack.
+   * Rejects requests with an invalid or replayed signature.
+   */
+  function requireSlackSignature(req, res, next) {
+    if (!slackSigningSecret) {
+      // Skip verification when no secret is configured (e.g. in unit tests)
+      return next();
+    }
+    const timestamp = req.headers['x-slack-request-timestamp'];
+    const signature = req.headers['x-slack-signature'];
+    const rawBody = req.body instanceof Buffer ? req.body.toString('utf8') : '';
+    if (!verifySlackRequest(slackSigningSecret, rawBody, timestamp, signature)) {
+      return res.status(401).json({ error: 'Invalid Slack signature.' });
+    }
+    return next();
+  }
+
+  /**
+   * Close an open find-time session, compute overlap, fetch presences, and post
+   * the results message to the channel.
+   */
+  async function closeSession(session) {
+    const now = new Date().toISOString();
+    await db.run(
+      `UPDATE find_time_sessions SET status = 'closed', closed_at = ? WHERE id = ?`,
+      [now, session.id]
+    );
+
+    const submissions = await db.all(
+      'SELECT * FROM find_time_submissions WHERE session_id = ?',
+      [session.id]
+    );
+
+    let presenceMap = {};
+    if (slackBotToken && submissions.length) {
+      await Promise.all(
+        submissions.map(async (s) => {
+          try {
+            presenceMap[s.user_id] = await slackApiCalls.getUserPresence(slackBotToken, s.user_id);
+          } catch {
+            presenceMap[s.user_id] = 'unknown';
+          }
+        })
+      );
+    }
+
+    const text = buildResultMessage(submissions, presenceMap);
+
+    if (slackBotToken) {
+      await slackApiCalls.postMessage(slackBotToken, session.channel_id, text);
+    }
+
+    return { text, submissions };
+  }
+
+  // Simple in-memory rate limiter for Slack-facing endpoints.
+  // Limits each remote IP to at most 60 requests per 60-second window.
+  const slackRateLimit = rateLimit({
+    windowMs: 60_000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many requests.' },
+  });
+
+  /**
+   * POST /slack/commands
+   * Handles the /find-time and /find-time-end slash commands.
+   */
+  app.post('/slack/commands', slackRateLimit, requireSlackSignature, async (req, res, next) => {
+    try {
+      const rawBody = req.body instanceof Buffer ? req.body.toString('utf8') : '';
+      const params = Object.fromEntries(new URLSearchParams(rawBody));
+
+      const { command, channel_id: channelId, user_id: userId, user_name: userName, trigger_id: triggerId } = params;
+
+      if (command === '/find-time') {
+        // Check for existing open session in this channel
+        const existing = await db.get(
+          `SELECT * FROM find_time_sessions WHERE channel_id = ? AND status = 'open'`,
+          [channelId]
+        );
+        if (existing) {
+          return res.json({
+            response_type: 'ephemeral',
+            text: 'A find-time poll is already open in this channel. Use `/find-time-end` to close it and see results.',
+          });
+        }
+
+        // Fetch channel members to track expected participant count
+        let expectedCount = 0;
+        if (slackBotToken) {
+          try {
+            const members = await slackApiCalls.getChannelMembers(slackBotToken, channelId);
+            // Bots typically have IDs starting with 'B'; filter them out heuristically.
+            // A more accurate approach is users.info but that would require N API calls.
+            expectedCount = members.filter((id) => !id.startsWith('B')).length;
+          } catch {
+            // Not a fatal error — we just won't auto-close on full submission
+            expectedCount = 0;
+          }
+        }
+
+        const result = await db.run(
+          `INSERT INTO find_time_sessions (channel_id, creator_id, creator_name, status, expected_count, created_at)
+           VALUES (?, ?, ?, 'open', ?, ?)`,
+          [channelId, userId, userName, expectedCount, new Date().toISOString()]
+        );
+        const sessionId = result.id;
+
+        // Open the modal for the person who ran /find-time
+        if (slackBotToken && triggerId) {
+          try {
+            await slackApiCalls.openModal(slackBotToken, triggerId, buildModal(sessionId, channelId));
+          } catch {
+            // Non-fatal; modal open can fail if trigger_id expired
+          }
+        }
+
+        // Post an announcement to the channel with a button for everyone else
+        if (slackBotToken) {
+          try {
+            const { text, blocks } = buildAnnouncementMessage(sessionId, userName);
+            await slackApiCalls.postMessage(slackBotToken, channelId, text, blocks);
+          } catch {
+            // Non-fatal
+          }
+        }
+
+        return res.json({
+          response_type: 'ephemeral',
+          text: 'Find-time poll started! A message has been posted to the channel.',
+        });
+      }
+
+      if (command === '/find-time-end') {
+        const session = await db.get(
+          `SELECT * FROM find_time_sessions WHERE channel_id = ? AND status = 'open'`,
+          [channelId]
+        );
+        if (!session) {
+          return res.json({
+            response_type: 'ephemeral',
+            text: 'There is no active find-time poll in this channel.',
+          });
+        }
+
+        const submissions = await db.all(
+          'SELECT * FROM find_time_submissions WHERE session_id = ?',
+          [session.id]
+        );
+        if (!submissions.length) {
+          return res.json({
+            response_type: 'ephemeral',
+            text: 'No one has submitted availability yet. The poll is still open.',
+          });
+        }
+
+        await closeSession(session);
+
+        return res.json({
+          response_type: 'ephemeral',
+          text: 'Find-time poll closed! Results have been posted to the channel.',
+        });
+      }
+
+      return res.status(400).json({ error: `Unknown command: ${command}` });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  /**
+   * POST /slack/interactive
+   * Handles interactive component payloads:
+   *   - block_actions: button click → open the find-time modal
+   *   - view_submission: modal submitted → save availability
+   */
+  app.post('/slack/interactive', slackRateLimit, requireSlackSignature, async (req, res, next) => {
+    try {
+      const rawBody = req.body instanceof Buffer ? req.body.toString('utf8') : '';
+      const payloadStr = new URLSearchParams(rawBody).get('payload');
+      if (!payloadStr) {
+        return res.status(400).json({ error: 'Missing payload.' });
+      }
+      const payload = JSON.parse(payloadStr);
+
+      const { type, user, trigger_id: triggerId } = payload;
+
+      // -----------------------------------------------------------------------
+      // Button click → open the modal
+      // -----------------------------------------------------------------------
+      if (type === 'block_actions') {
+        const action = payload.actions?.[0];
+        if (action?.action_id === 'open_find_time_modal') {
+          const sessionId = Number(action.value);
+          const session = await db.get(
+            `SELECT * FROM find_time_sessions WHERE id = ? AND status = 'open'`,
+            [sessionId]
+          );
+          if (!session) {
+            return res.json({
+              response_action: 'errors',
+              errors: { tz: 'This find-time poll has already been closed.' },
+            });
+          }
+
+          if (slackBotToken && triggerId) {
+            await slackApiCalls.openModal(slackBotToken, triggerId, buildModal(sessionId, session.channel_id));
+          }
+        }
+        return res.send('');
+      }
+
+      // -----------------------------------------------------------------------
+      // Modal submission → save availability
+      // -----------------------------------------------------------------------
+      if (type === 'view_submission' && payload.view?.callback_id === 'find_time_submit') {
+        let meta;
+        try {
+          meta = JSON.parse(payload.view.private_metadata || '{}');
+        } catch {
+          meta = {};
+        }
+        const { session_id: sessionId, channel_id: channelId } = meta;
+
+        const session = await db.get(
+          `SELECT * FROM find_time_sessions WHERE id = ? AND status = 'open'`,
+          [sessionId]
+        );
+        if (!session) {
+          return res.json({
+            response_action: 'errors',
+            errors: { tz: 'This find-time poll has already been closed.' },
+          });
+        }
+
+        const values = payload.view.state?.values || {};
+        const timezone = values?.tz?.tz_select?.selected_option?.value;
+        const dateStr = values?.avail_date?.date_pick?.selected_date;
+        const startStr = values?.start_time?.start_pick?.selected_time;
+        const endStr = values?.end_time?.end_pick?.selected_time;
+
+        if (!timezone || !dateStr || !startStr || !endStr) {
+          return res.json({
+            response_action: 'errors',
+            errors: { tz: 'Please fill in all fields.' },
+          });
+        }
+
+        const tzEntry = COMMON_TIMEZONES.find((t) => t.value === timezone);
+        if (!tzEntry) {
+          return res.json({
+            response_action: 'errors',
+            errors: { tz: 'Unknown timezone selected.' },
+          });
+        }
+
+        let startUtc, endUtc;
+        try {
+          startUtc = localToUTC(dateStr, startStr, timezone);
+          endUtc = localToUTC(dateStr, endStr, timezone);
+        } catch (err) {
+          return res.json({
+            response_action: 'errors',
+            errors: { start_time: err.message },
+          });
+        }
+
+        if (new Date(startUtc) >= new Date(endUtc)) {
+          return res.json({
+            response_action: 'errors',
+            errors: { end_time: 'End time must be after start time.' },
+          });
+        }
+
+        const userId = user?.id;
+        const userName = user?.name || user?.username || userId;
+
+        // Upsert: allow re-submission (UPDATE on conflict)
+        await db.run(
+          `INSERT INTO find_time_submissions
+             (session_id, user_id, user_name, timezone, timezone_label, start_time_utc, end_time_utc, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(session_id, user_id) DO UPDATE SET
+             timezone = excluded.timezone,
+             timezone_label = excluded.timezone_label,
+             start_time_utc = excluded.start_time_utc,
+             end_time_utc = excluded.end_time_utc,
+             created_at = excluded.created_at`,
+          [sessionId, userId, userName, timezone, tzEntry.label, startUtc, endUtc, new Date().toISOString()]
+        );
+
+        // Auto-close when all expected participants have submitted
+        if (session.expected_count > 0) {
+          const count = await db.get(
+            'SELECT COUNT(*) AS cnt FROM find_time_submissions WHERE session_id = ?',
+            [sessionId]
+          );
+          if (count.cnt >= session.expected_count) {
+            await closeSession(session);
+          }
+        }
+
+        // Acknowledge the modal submission (close the modal)
+        return res.json({ response_action: 'clear' });
+      }
+
+      return res.send('');
     } catch (error) {
       return next(error);
     }

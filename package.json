@@ -6,7 +6,6 @@
     "start": "node src/server.js",
     "test": "node --test",
     "postinstall": "npm rebuild sqlite3"
-
   },
   "keywords": [],
   "author": "",
@@ -14,6 +13,8 @@
   "description": "MVP huddle scheduling app with Slack integration",
   "dependencies": {
     "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
+    "luxon": "^3.7.2",
     "sqlite3": "^5.1.2"
   },
   "devDependencies": {
